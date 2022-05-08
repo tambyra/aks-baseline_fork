@@ -46,7 +46,7 @@ param clusterAuthorizedIPRanges array = []
   'southeastasia'
 ])
 param location string = 'eastus2'
-param kubernetesVersion string = '1.22.4'
+param kubernetesVersion string = '1.23.5'
 
 @description('Domain name to use for App Gateway and AKS ingress.')
 param domainName string = 'contoso.com'
@@ -55,20 +55,12 @@ param domainName string = 'contoso.com'
 @minLength(9)
 param gitOpsBootstrappingRepoHttpsUrl string = 'https://github.com/mspnp/aks-baseline'
 
-@description('You cluster will be bootstrapped from this branch in the identifed git repo.')
+@description('You cluster will be bootstrapped from this branch in the identified git repo.')
 @minLength(1)
 param gitOpsBootstrappingRepoBranch string = 'main'
 
 /*** VARIABLES ***/
 
-var monitoringMetricsPublisherRole = '${subscription().id}/providers/Microsoft.Authorization/roleDefinitions/3913510d-42f4-4e42-8a64-420c390055eb'
-var acrPullRole = '${subscription().id}/providers/Microsoft.Authorization/roleDefinitions/7f951dda-4ed3-4680-a7ca-43fe172d538d'
-var managedIdentityOperatorRole = '${subscription().id}/providers/Microsoft.Authorization/roleDefinitions/f1a07417-d97a-45cb-824c-7a7467783830'
-var keyVaultReader = '${subscription().id}/providers/Microsoft.Authorization/roleDefinitions/21090545-7ca7-4776-b22c-e363652d74d2'
-var keyVaultSecretsUserRole = '${subscription().id}/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6'
-var clusterAdminRoleId = 'b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b'
-var serviceClusterUserRoleId = '4abbcc35-e782-43d8-92c5-2d3f1bd2253f'
-var clusterReaderRoleId = '7f6c6a51-bcf8-42ba-9220-52d62157d7db'
 var subRgUniqueString = uniqueString('aks', subscription().subscriptionId, resourceGroup().id)
 
 var clusterName = '${prefix}-aks-${subRgUniqueString}'
@@ -76,6 +68,7 @@ var nodeResourceGroupName = '${prefix}-rg-${clusterName}-nodepools'
 var defaultAcrName = '${prefix}acraks${subRgUniqueString}'
 
 var agwName = '${prefix}-apw-${subRgUniqueString}'
+var wafPolicyName = '${prefix}-waf-${subRgUniqueString}'
 
 var aksIngressDomainName = 'aks-ingress.${domainName}'
 var aksBackendDomainName = 'bu0001a0008-00.${aksIngressDomainName}'
@@ -94,6 +87,56 @@ var policyAssignmentNameEnforceResourceLimits = guid(policyResourceIdEnforceReso
 var policyAssignmentNameEnforceImageSource = guid(policyResourceIdEnforceImageSource, resourceGroup().name, clusterName)
 var policyAssignmentNameEnforceDefenderInCluster = guid(policyResourceIdEnforceDefenderInCluster, resourceGroup().name, clusterName)
 var isUsingAzureRBACasKubernetesRBAC = (subscription().tenantId == k8sControlPlaneAuthorizationTenantId)
+
+/*** EXISTING SUBSCRIPTION RESOURCES ***/
+
+// Built-in Azure RBAC role that is applied to a cluster to indicate they can be considered a user/group of the cluster, subject to additional RBAC permissions
+resource serviceClusterUserRole 'Microsoft.Authorization/roleDefinitions@2018-01-01-preview' existing = {
+  name: '4abbcc35-e782-43d8-92c5-2d3f1bd2253f'
+  scope: subscription()
+}
+
+// Built-in Azure RBAC role that can be applied to a cluster or a namespace to grant read and write privileges to that scope for a user or group
+resource clusterAdminRole 'Microsoft.Authorization/roleDefinitions@2018-01-01-preview' existing = {
+  name: 'b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b'
+  scope: subscription()
+}
+
+// Built-in Azure RBAC role that can be applied to a cluster or a namespace to grant read privileges to that scope for a user or group
+resource clusterReaderRole 'Microsoft.Authorization/roleDefinitions@2018-01-01-preview' existing = {
+  name: '7f6c6a51-bcf8-42ba-9220-52d62157d7db'
+  scope: subscription()
+}
+
+// Built-in Azure RBAC role that is applied to a cluster to grant its monitoring agent's identity with publishing metrics and push alerts permissions.
+resource monitoringMetricsPublisherRole 'Microsoft.Authorization/roleDefinitions@2018-01-01-preview' existing = {
+  name: '3913510d-42f4-4e42-8a64-420c390055eb'
+  scope: subscription()
+}
+
+// Built-in Azure RBAC role that can be applied to an Azure Container Registry to grant the authority pull container images. Granted to the AKS cluster's kubelet identity.
+resource acrPullRole 'Microsoft.Authorization/roleDefinitions@2018-01-01-preview' existing = {
+  name: '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+  scope: subscription()
+}
+
+// Built-in Azure RBAC role that must be applied to the kublet Managed Identity allowing it to further assign adding managed identities to the cluster's underlying VMSS.
+resource managedIdentityOperatorRole 'Microsoft.Authorization/roleDefinitions@2018-01-01-preview' existing = {
+  name: 'f1a07417-d97a-45cb-824c-7a7467783830'
+  scope: subscription()
+}
+
+// Built-in Azure RBAC role that is applied a Key Vault to grant with metadata, certificates, keys and secrets read privileges.  Granted to App Gateway's managed identity.
+resource keyVaultReaderRole 'Microsoft.Authorization/roleDefinitions@2018-01-01-preview' existing = {
+  name: '21090545-7ca7-4776-b22c-e363652d74d2'
+  scope: subscription()
+}
+
+// Built-in Azure RBAC role that is applied to a Key Vault to grant with secrets content read privileges. Granted to both Key Vault and our workload's identity.
+resource keyVaultSecretsUserRole 'Microsoft.Authorization/roleDefinitions@2018-01-01-preview' existing = {
+  name: '4633458b-17de-408a-b874-0445c86b69e6'
+  scope: subscription()
+}
 
 /*** EXISTING HUB RESOURCES ***/
 
@@ -1095,9 +1138,9 @@ resource kv_diagnosticSettings  'Microsoft.Insights/diagnosticSettings@2021-05-0
 // Grant the Azure Application Gateway managed identity with key vault reader role permissions; this allows pulling frontend and backend certificates.
 resource kvMiAppGatewayFrontendSecretsUserRole_roleAssignment 'Microsoft.Authorization/roleAssignments@2020-10-01-preview' = {
   scope: kv
-  name: guid(resourceGroup().id, 'mi-appgateway-frontend', keyVaultSecretsUserRole)
+  name: guid(resourceGroup().id, 'mi-appgateway-frontend', keyVaultSecretsUserRole.id)
   properties: {
-    roleDefinitionId: keyVaultSecretsUserRole
+    roleDefinitionId: keyVaultSecretsUserRole.id
     principalId: miAppGatewayFrontend.properties.principalId
     principalType: 'ServicePrincipal'
   }
@@ -1107,9 +1150,9 @@ resource kvMiAppGatewayFrontendSecretsUserRole_roleAssignment 'Microsoft.Authori
 // Grant the Azure Application Gateway managed identity with key vault reader role permissions; this allows pulling frontend and backend certificates.
 resource kvMiAppGatewayFrontendKeyVaultReader_roleAssignment 'Microsoft.Authorization/roleAssignments@2020-10-01-preview' = {
   scope: kv
-  name: guid(resourceGroup().id, 'mi-appgateway-frontend', keyVaultReader)
+  name: guid(resourceGroup().id, 'mi-appgateway-frontend', keyVaultReaderRole.id)
   properties: {
-    roleDefinitionId: keyVaultReader
+    roleDefinitionId: keyVaultReaderRole.id
     principalId: miAppGatewayFrontend.properties.principalId
     principalType: 'ServicePrincipal'
   }
@@ -1119,9 +1162,9 @@ resource kvMiAppGatewayFrontendKeyVaultReader_roleAssignment 'Microsoft.Authoriz
 // Grant the AKS cluster ingress controller pod managed identity with key vault reader role permissions; this allows our ingress controller to pull certificates.
 resource kvPodMiIngressControllerSecretsUserRole_roleAssignment 'Microsoft.Authorization/roleAssignments@2020-10-01-preview' = {
   scope: kv
-  name: guid(resourceGroup().id, 'podmi-ingress-controller', keyVaultSecretsUserRole)
+  name: guid(resourceGroup().id, 'podmi-ingress-controller', keyVaultSecretsUserRole.id)
   properties: {
-    roleDefinitionId: keyVaultSecretsUserRole
+    roleDefinitionId: keyVaultSecretsUserRole.id
     principalId: podmiIngressController.properties.principalId
     principalType: 'ServicePrincipal'
   }
@@ -1131,9 +1174,9 @@ resource kvPodMiIngressControllerSecretsUserRole_roleAssignment 'Microsoft.Autho
 // Grant the AKS cluster ingress controller pod managed identity with key vault reader role permissions; this allows our ingress controller to pull certificates
 resource kvPodMiIngressControllerKeyVaultReader_roleAssignment 'Microsoft.Authorization/roleAssignments@2020-10-01-preview' = {
   scope: kv
-  name: guid(resourceGroup().id, 'podmi-ingress-controller', keyVaultReader)
+  name: guid(resourceGroup().id, 'podmi-ingress-controller', keyVaultReaderRole.id)
   properties: {
-    roleDefinitionId: keyVaultReader
+    roleDefinitionId: keyVaultReaderRole.id
     principalId: podmiIngressController.properties.principalId
     principalType: 'ServicePrincipal'
   }
@@ -1423,9 +1466,9 @@ resource mc 'Microsoft.ContainerService/managedClusters@2022-01-02-preview' = {
 
 resource acrKubeletAcrPullRole_roleAssignment 'Microsoft.Authorization/roleAssignments@2020-10-01-preview' = {
   scope: acr
-  name: guid(mc.id, acrPullRole)
+  name: guid(mc.id, acrPullRole.id)
   properties: {
-    roleDefinitionId: acrPullRole
+    roleDefinitionId: acrPullRole.id
     description: 'Allows AKS to pull container images from this ACR instance.'
     principalId: mc.properties.identityProfile.kubeletidentity.objectId
     principalType: 'ServicePrincipal'
@@ -1436,9 +1479,9 @@ resource acrKubeletAcrPullRole_roleAssignment 'Microsoft.Authorization/roleAssig
 // Grant the OMS Agent's Managed Identity the metrics publisher role to push alerts
 resource mcOmsAgentMonitoringMetricsPublisherRole_roleAssignment 'Microsoft.Authorization/roleAssignments@2020-10-01-preview' = {
   scope: mc
-  name: guid(mc.id, 'omsagent', monitoringMetricsPublisherRole)
+  name: guid(mc.id, 'omsagent', monitoringMetricsPublisherRole.id)
   properties: {
-    roleDefinitionId: monitoringMetricsPublisherRole
+    roleDefinitionId: monitoringMetricsPublisherRole.id
     principalId: mc.properties.addonProfiles.omsagent.identity.objectId
     principalType: 'ServicePrincipal'
   }
@@ -1448,9 +1491,9 @@ resource mcOmsAgentMonitoringMetricsPublisherRole_roleAssignment 'Microsoft.Auth
 // Grant the AKS cluster with Managed Identity Operator role permissions over the managed identity used for the ingress controller. Allows it to be assigned to the underlying VMSS.
 resource miKubeletManagedIdentityOperatorRole_roleAssignment 'Microsoft.Authorization/roleAssignments@2020-10-01-preview' = {
   scope: podmiIngressController
-  name: guid(resourceGroup().id, 'podmi-ingress-controller', managedIdentityOperatorRole)
+  name: guid(resourceGroup().id, 'podmi-ingress-controller', managedIdentityOperatorRole.id)
   properties: {
-    roleDefinitionId: managedIdentityOperatorRole
+    roleDefinitionId: managedIdentityOperatorRole.id
     principalId: mc.properties.identityProfile.kubeletidentity.objectId
     principalType: 'ServicePrincipal'
   }
@@ -1461,7 +1504,7 @@ resource mcAadAdminGroupClusterAdminRole_roleAssignment 'Microsoft.Authorization
   scope: mc
   name: guid('aad-admin-group', mc.id, clusterAdminAadGroupObjectId)
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', clusterAdminRoleId)
+    roleDefinitionId: clusterAdminRole.id
     description: 'Members of this group are cluster admins of this cluster.'
     principalId: clusterAdminAadGroupObjectId
     principalType: 'Group'
@@ -1473,7 +1516,7 @@ resource mcAadAdminGroupServiceClusterUserRole_roleAssignment 'Microsoft.Authori
   scope: mc
   name: guid('aad-admin-group-sc', mc.id, clusterAdminAadGroupObjectId)
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', serviceClusterUserRoleId)
+    roleDefinitionId: serviceClusterUserRole.id
     description: 'Members of this group are cluster users of this cluster.'
     principalId: clusterAdminAadGroupObjectId
     principalType: 'Group'
@@ -1485,9 +1528,9 @@ resource maAadA0008ReaderGroupClusterReaderRole_roleAssignment 'Microsoft.Author
   scope: nsA0008
   name: guid('aad-a0008-reader-group', mc.id, a0008NamespaceReaderAadGroupObjectId)
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', clusterReaderRoleId)
+    roleDefinitionId: clusterReaderRole.id
+    description: 'Members of this group are readers of the a0008 namespace in this cluster.'
     principalId: a0008NamespaceReaderAadGroupObjectId
-    description: 'Members of this group are cluster admins of the a0008 namespace in this cluster.'
     principalType: 'Group'
   }
   dependsOn: []
@@ -1497,9 +1540,9 @@ resource maAadA0008ReaderGroupServiceClusterUserRole_roleAssignment 'Microsoft.A
   scope: mc
   name: guid('aad-a0008-reader-group-sc', mc.id, a0008NamespaceReaderAadGroupObjectId)
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', serviceClusterUserRoleId)
-    principalId: a0008NamespaceReaderAadGroupObjectId
+    roleDefinitionId: serviceClusterUserRole.id
     description: 'Members of this group are cluster users of this cluster.'
+    principalId: a0008NamespaceReaderAadGroupObjectId
     principalType: 'Group'
   }
   dependsOn: []
@@ -1641,6 +1684,26 @@ resource st_diagnosticSettings  'Microsoft.Insights/diagnosticSettings@2021-05-0
   dependsOn: []
 }
 
+resource wafPolicy 'Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies@2021-05-01' = {
+  name: wafPolicyName
+  properties: {
+    policySettings: {
+        fileUploadLimitInMb: 10
+        state: 'Enabled'
+        mode: 'Prevention'
+    }
+    managedRules: {
+        managedRuleSets: [
+            {
+                ruleSetType: 'OWASP'
+                ruleSetVersion: '3.2'
+                ruleGroupOverrides: []
+            }
+        ]
+    }
+  }
+}
+
 resource agw 'Microsoft.Network/applicationGateways@2021-05-01' = {
   name: agwName
   location: location
@@ -1704,14 +1767,8 @@ resource agw 'Microsoft.Network/applicationGateways@2021-05-01' = {
       minCapacity: 0
       maxCapacity: 10
     }
-    webApplicationFirewallConfiguration: {
-      enabled: true
-      firewallMode: 'Prevention'
-      ruleSetType: 'OWASP'
-      ruleSetVersion: '3.2'
-      exclusions: []
-      fileUploadLimitInMb: 10
-      disabledRuleGroups: []
+    firewallPolicy: {
+      id: wafPolicy.id
     }
     enableHttp2: false
     sslCertificates: [
@@ -1841,5 +1898,6 @@ resource agwdiagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01
 
 output aksClusterName string = clusterName
 output aksIngressControllerPodManagedIdentityResourceId string = podmiIngressController.id
-output aksIngressControllerPodManagedIdentityClientId string = reference(podmiIngressController.id, '2018-11-30').clientId
+output aksIngressControllerPodManagedIdentityClientId string = podmiIngressController.properties.clientId
+output aksOidcIssuerUrl string = mc.properties.oidcIssuerProfile.issuerURL
 output keyVaultName string = kv.name
