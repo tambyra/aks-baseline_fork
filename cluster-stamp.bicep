@@ -1690,6 +1690,7 @@ resource st_diagnosticSettings  'Microsoft.Insights/diagnosticSettings@2021-05-0
 
 resource wafPolicy 'Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies@2021-05-01' = {
   name: wafPolicyName
+  location: location
   properties: {
     policySettings: {
         fileUploadLimitInMb: 10
